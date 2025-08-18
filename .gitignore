@@ -1,0 +1,9 @@
+# Environment variables
+.env
+
+# Node modules
+node_modules
+
+# Early Edge Functions
+batch-alerts.ts
+new-alert.ts
