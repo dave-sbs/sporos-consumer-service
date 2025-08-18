@@ -1,13 +1,25 @@
 {
+  "name": "consumer-service",
+  "version": "1.0.0",
+  "description": "Queue consumer service with adaptive concurrency and circuit breaker",
+  "main": "consumer.ts",
+  "scripts": {
+    "start": "ts-node consumer.ts",
+    "dev": "ts-node --watch consumer.ts",
+    "build": "tsc",
+    "start:prod": "node dist/consumer.js"
+  },
   "dependencies": {
-    "@supabase/supabase-js": "^2.55.0",
-    "dotenv": "^17.2.1",
-    "pino": "^9.9.0",
-    "zod": "^4.0.17"
+    "@supabase/supabase-js": "^2.39.0",
+    "dotenv": "^16.3.1",
+    "pino": "^8.17.0"
   },
   "devDependencies": {
-    "@types/node": "^24.3.0",
-    "tsx": "^4.20.4",
-    "typescript": "^5.9.2"
-  }
+    "@types/node": "^20.10.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.0"
+  },
+  "keywords": ["queue", "consumer", "circuit-breaker", "adaptive-concurrency"],
+  "author": "",
+  "license": "MIT"
 }

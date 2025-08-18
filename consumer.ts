@@ -1,6 +1,5 @@
 import pino from 'pino'
 import 'dotenv/config'
-
 import { createClient } from '@supabase/supabase-js'
 
 const logger = pino()
@@ -95,6 +94,10 @@ class QueueConsumer {
     private adjustmentInterval = 30000; // 30 seconds
     private successThreshold = 0.95; // 95% success rate to increase concurrency
     private maxRetries = 3;
+    private isServerless = false; // Enable serverless mode
+    private idleTimeout = 30000; // 30 seconds of no work before shutdown
+    private lastWorkTime = Date.now();
+    private enableHttpServer = false; // Set to true if you want HTTP wake-up endpoint
     
     private circuitBreaker = {
         state: 'CLOSED' as 'CLOSED' | 'OPEN' | 'HALF_OPEN',
@@ -107,19 +110,78 @@ class QueueConsumer {
     }
 
     async start() {
-        logger.info(`Consumer starting with ID: ${this.consumerId}`)
+        logger.info(`Consumer starting with ID: ${this.consumerId} in ${this.isServerless ? 'serverless' : 'continuous'} mode`)
 
         // Restore state from DB
         await this.restoreState() 
         
-        // Main processing loop
+        // Start HTTP server if enabled (for wake-up calls)
+        if (this.enableHttpServer) {
+            this.startHttpServer()
+        }
+        
+        if (this.isServerless) {
+            await this.runServerless()
+        } else {
+            await this.runContinuous()
+        }
+    }
+
+    private startHttpServer(): void {
+        // Simple HTTP server for wake-up calls
+        const http = require('http')
+        const server = http.createServer((req: any, res: any) => {
+            if (req.method === 'POST' && req.url === '/wake') {
+                logger.info('Received wake-up call from edge function')
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ status: 'awake', consumerId: this.consumerId }))
+                
+                // Wake up the consumer
+                this.wakeUp()
+            } else if (req.method === 'GET' && req.url === '/health') {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ 
+                    status: 'healthy', 
+                    consumerId: this.consumerId,
+                    mode: this.isServerless ? 'serverless' : 'continuous',
+                    idleTime: Date.now() - this.lastWorkTime
+                }))
+            } else {
+                res.writeHead(404)
+                res.end('Not found')
+            }
+        })
+        
+        const port = process.env.PORT || 3000
+        server.listen(port, () => {
+            logger.info(`HTTP server listening on port ${port}`)
+        })
+    }
+
+    private async runServerless(): Promise<void> {
+        logger.info('Running in serverless mode - will shutdown when idle')
+        
         while (true) {
             try {
                 if (this.canProcess()) {
-                    await this.processNextBatch()
+                    const hasWork = await this.processNextBatch()
+                    if (hasWork) {
+                        this.lastWorkTime = Date.now()
+                        logger.info('Work found, resetting idle timer')
+                    } else {
+                        // Check if we've been idle long enough to shutdown
+                        const idleTime = Date.now() - this.lastWorkTime
+                        if (idleTime > this.idleTimeout) {
+                            logger.info(`Idle for ${idleTime}ms, shutting down serverless consumer`)
+                            await this.shutdown()
+                            process.exit(0)
+                        } else {
+                            logger.debug(`Idle for ${idleTime}ms, will shutdown in ${this.idleTimeout - idleTime}ms`)
+                        }
+                    }
                 } else {
                     logger.info('Circuit breaker OPEN, waiting...')
-                    await this.sleep(this.circuitBreaker.timeout / 4) // Check every quarter timeout period
+                    await this.sleep(this.circuitBreaker.timeout / 4)
                 }
                 
                 await this.sendHeartbeat()
@@ -129,7 +191,29 @@ class QueueConsumer {
                 await this.handleError(error)
             }
 
-            // Small delay between batches
+            await this.sleep(1000)
+        }
+    }
+
+    private async runContinuous(): Promise<void> {
+        logger.info('Running in continuous mode - will run indefinitely')
+        
+        while (true) {
+            try {
+                if (this.canProcess()) {
+                    await this.processNextBatch()
+                } else {
+                    logger.info('Circuit breaker OPEN, waiting...')
+                    await this.sleep(this.circuitBreaker.timeout / 4)
+                }
+                
+                await this.sendHeartbeat()
+                await this.adjustConcurrency()
+            } catch (error) {
+                logger.error({ error }, 'Processing error')
+                await this.handleError(error)
+            }
+
             await this.sleep(1000)
         }
     }
@@ -188,11 +272,11 @@ class QueueConsumer {
     }
 
     // Processing Methods
-    private async processNextBatch(): Promise<void> {
+    private async processNextBatch(): Promise<boolean> {
         const messages = await this.fetchNextBatch()
         if (messages.length === 0) {
             await this.sleep(2000) // No messages, wait longer
-            return
+            return false
         }
 
         logger.info(`Processing batch of ${messages.length} messages with concurrency ${this.concurrency}`)
@@ -200,6 +284,7 @@ class QueueConsumer {
         // Process messages with limited concurrency
         const promises = messages.map(message => this.processMessage(message))
         await Promise.allSettled(promises)
+        return true
     }
 
     private async fetchNextBatch(): Promise<AlertsQueue[]> {
@@ -462,10 +547,32 @@ class QueueConsumer {
         
         logger.info('Consumer shutdown complete')
     }
+
+    // Method to wake up consumer (called by edge function)
+    public wakeUp(): void {
+        logger.info('Consumer woken up by external call')
+        this.lastWorkTime = Date.now()
+    }
 }
 
 // Start consumer
 const consumer = new QueueConsumer()
+
+// Configuration from environment variables
+const config = {
+    serverless: process.env.CONSUMER_MODE === 'serverless' ? true : false,
+    idleTimeout: parseInt(process.env.IDLE_TIMEOUT || '30000'),
+    enableHttp: process.env.ENABLE_HTTP === 'true' ? true : false,
+    port: process.env.PORT || 3000
+}
+
+// Apply configuration
+consumer['isServerless'] = config.serverless
+consumer['idleTimeout'] = config.idleTimeout
+consumer['enableHttpServer'] = config.enableHttp
+
+logger.info({ config }, 'Consumer configuration loaded')
+
 consumer.start().catch(error => {
     logger.fatal({ error }, 'Consumer crashed')
     process.exit(1)
