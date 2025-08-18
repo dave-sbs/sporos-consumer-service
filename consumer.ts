@@ -9,6 +9,16 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
   logger.info('Environment variables loaded successfully.');
 }
 
+const LANGGRAPH_API_URL = process.env.LANGGRAPH_API_URL!
+const LANGGRAPH_API_KEY = process.env.LANGGRAPH_API_KEY!
+const LANGGRAPH_ASSISTANT_ID = process.env.LANGGRAPH_ASSISTANT_ID!
+
+if (!LANGGRAPH_API_URL || !LANGGRAPH_API_KEY || !LANGGRAPH_ASSISTANT_ID) {
+  logger.error('Environment variables LANGGRAPH_API_URL, LANGGRAPH_API_KEY, or LANGGRAPH_ASSISTANT_ID are missing or inaccessible.');
+} else {
+  logger.info('Environment variables loaded successfully.');
+}
+
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -327,7 +337,7 @@ class QueueConsumer {
 
     private async processMessage(message: AlertsQueue): Promise<void> {
         try {
-            logger.info(`Processing message ${message.id} for alert ${message.alert_id}`)
+            logger.info(`Simulating processing message ${message.id} for alert ${message.payload.alert_name}`)
 
             // Simulate processing - replace with actual alert processing logic
             await this.processAlert(message.payload)
@@ -357,15 +367,85 @@ class QueueConsumer {
 
     private async processAlert(payload: AlertPayload): Promise<void> {
         // TODO: Implement actual alert processing logic
-        
-        // Simulate processing time
-        await this.sleep(100 + Math.random() * 200)
-        logger.info(`Processed alert ${payload.id}`)
-        
-        // Simulate occasional failures for testing
-        if (Math.random() < 0.5) { // 50% failure rate
-            throw new Error('Simulated processing failure')
+        // Send to LangGraph without user authentication
+        try {
+            const result = await this.sendToLangGraph(payload);
+
+            if (result.status === 'error') {
+                throw new Error(result.error);
+            }
+
+            // console.log(`LangGraph response:`, result);
+
+            // Extract matches - adjust based on your LangGraph response structure
+            const matches = this.extractMatches(result);
+
+            // Debug response from extractMatches function
+            console.log(matches);
+            
+        } catch (error) {
+            console.error('Processing failed:', error);
+            // Simulate occasional failures for testing
+            // if (Math.random() < 0.5) { // 50% failure rate
+            //     throw new Error('Simulated processing failure')
+            // }
         }
+    }
+
+    private async sendToLangGraph(payload: AlertPayload): Promise<any> {
+        const langgraph_payload = {
+            assistant_id: LANGGRAPH_ASSISTANT_ID,
+            thread_id: `alert_${payload.id}`,
+            input: {
+            query: payload.alert_name   
+            }
+        };
+
+        const headers = {
+            'Content-Type': 'application/json'
+        };
+
+        if (LANGGRAPH_API_KEY) {
+            headers['x-api-key'] = LANGGRAPH_API_KEY;
+        }
+
+        const controller = new AbortController();
+        const timeout = setTimeout(()=>controller.abort(), 10000);
+        try {
+            const response = await fetch(`${LANGGRAPH_API_URL}/runs/wait`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(langgraph_payload),
+                signal: controller.signal
+            });
+
+            console.log('LangGraph response status:', response.status);
+            console.log('LangGraph response headers:', Object.fromEntries(response.headers.entries()));
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('LangGraph error response:', errorText);
+                throw new Error(`LangGraph error: ${response.status} - ${errorText}`);
+            }
+
+            const result = await response.json();
+            return result;
+        } finally{
+            clearTimeout(timeout);
+        }
+    }
+
+    // Extract matches from LangGraph response
+    private async extractMatches(response: any): Promise<any> {
+        const matches: any[] = [];
+        if (response.retrieved_docs) {
+            for (const doc of response.retrieved_docs){
+            matches.push({
+                bill_id: doc.id
+            });
+        }
+        }
+        return matches;
     }
 
     private async markMessageCompleted(messageId: string): Promise<void> {
