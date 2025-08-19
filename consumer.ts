@@ -96,7 +96,7 @@ interface QueueConsumerState {
 class QueueConsumer {
     private concurrency = 1;
     private minConcurrency = 1;
-    private maxConcurrency = 3;
+    private maxConcurrency = 5;
     private consumerId = `consumer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     private successCount = 0;
     private errorCount = 0;
@@ -108,6 +108,9 @@ class QueueConsumer {
     private idleTimeout = 30000; // 30 seconds of no work before shutdown
     private lastWorkTime = Date.now();
     private enableHttpServer = false; // Set to true if you want HTTP wake-up endpoint
+
+    // Debug non-matches
+    private nonMatchedResponses: Record<string, any> = {};
     
     private circuitBreaker = {
         state: 'CLOSED' as 'CLOSED' | 'OPEN' | 'HALF_OPEN',
@@ -183,6 +186,7 @@ class QueueConsumer {
                         const idleTime = Date.now() - this.lastWorkTime
                         if (idleTime > this.idleTimeout) {
                             logger.info(`Idle for ${idleTime}ms, shutting down serverless consumer`)
+                            console.log(`Non-matches: ${JSON.stringify(this.nonMatchedResponses)}`);
                             await this.shutdown()
                             process.exit(0)
                         } else {
@@ -370,25 +374,14 @@ class QueueConsumer {
         // Send to LangGraph without user authentication
         try {
             const result = await this.sendToLangGraph(payload);
-
             if (result.status === 'error') {
                 throw new Error(result.error);
             }
 
-            // console.log(`LangGraph response:`, result);
-
-            // Extract matches - adjust based on your LangGraph response structure
-            const matches = this.extractMatches(result);
-
-            // Debug response from extractMatches function
-            console.log(matches);
+            const matches = await this.extractMatches(result);
             
         } catch (error) {
             console.error('Processing failed:', error);
-            // Simulate occasional failures for testing
-            // if (Math.random() < 0.5) { // 50% failure rate
-            //     throw new Error('Simulated processing failure')
-            // }
         }
     }
 
@@ -419,9 +412,6 @@ class QueueConsumer {
                 signal: controller.signal
             });
 
-            console.log('LangGraph response status:', response.status);
-            console.log('LangGraph response headers:', Object.fromEntries(response.headers.entries()));
-
             if (!response.ok) {
                 const errorText = await response.text();
                 console.error('LangGraph error response:', errorText);
@@ -443,8 +433,14 @@ class QueueConsumer {
             matches.push({
                 bill_id: doc.id
             });
+            }
         }
+        console.log(`Matches found: ${matches.length}`);
+
+        if (matches.length === 0) {
+            this.nonMatchedResponses[response.query] = response;
         }
+
         return matches;
     }
 

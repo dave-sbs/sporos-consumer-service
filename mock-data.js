@@ -1,0 +1,188 @@
+import { createClient } from "@supabase/supabase-js";
+import "dotenv/config";
+
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+const userId = "7c46b4bf-f16b-4bf9-9a42-a99bd2b58e31";
+const mockData = [
+        "State Renewable Portfolio Standards (RPS) targets and carve-outs",
+        "State clean energy standards (CES) and 100% clean mandates",
+        "Federal and state carbon pricing or cap-and-trade programs",
+        "Low Carbon Fuel Standard (LCFS) programs and expansions",
+        "Methane emissions rules for oil and gas (state + federal OOOO/OOOOa)",
+        "Hydrofluorocarbon (HFC) phasedown and refrigerant management rules",
+        "Building energy codes (IECC/ASHRAE) adoption and stretch codes by state",
+        "State and federal transmission permitting reforms (FERC/NEPA state siting)",
+        "Offshore wind leasing and state procurement schedules",
+        "Distributed solar net metering and value-of-solar tariffs",
+        "Interconnection queue reform and hosting capacity maps requirements",
+        "State EV purchase rebates and federal tax credits alignment",
+        "EV charging infrastructure mandates, rate design, and make-ready programs",
+        "Clean trucks rules (ACT/NorCal variants) and fleet mandates",
+        "State zero-emission school bus and transit bus funding programs",
+        "Carbon capture, utilization, and storage (CCUS) Class VI well permitting",
+        "Geologic carbon storage pore space and long-term liability statutes",
+        "Environmental justice (EJ) screening and cumulative impact laws",
+        "State plastics bans (single-use bags, straws, foam) and bottle bills",
+        "Extended Producer Responsibility (EPR) for packaging, batteries, e-waste",
+        "PFAS drinking water MCLs and product bans/restrictions",
+        "Wetlands protection and state Section 401 water quality certification rules",
+        "Stormwater permits (MS4/Industrial) and green infrastructure incentives",
+        "State groundwater sustainability and water rights reforms",
+        "Brownfield cleanup, voluntary remediation, and liability protections",
+        "Air quality State Implementation Plans (SIPs) and nonattainment updates",
+        "State wildfire resilience, prescribed burn, and forest management policies",
+        "Building performance standards (BPS) for existing buildings",
+        "Appliance efficiency standards and gas hookup restrictions",
+        "Community solar enabling statutes and program capacity caps",
+        "Agrivoltaics and dual-use siting rules on farmland",
+        "State hydrogen hub participation and clean hydrogen standards",
+        "Renewable energy tax abatement/ PILOT agreements and local siting ordinances",
+        "FEMA hazard mitigation and climate resilience funding match rules",
+        "State disaster recovery and buyout/relocation programs",
+        "Public utility commission dockets on grid modernization and AMI",
+        "Energy storage incentives, ITC adders, and fire code adoption",
+        "Microgrid and resilience hub enabling legislation",
+        "State water reuse, direct potable reuse (DPR) regulations",
+        "Biodiversity conservation funding and endangered species listings",
+        
+        "Medicaid expansion status and waiver (1115/1915) approvals",
+        "State telehealth parity laws (payment and modality) and licensure rules",
+        "Cross-state physician and nurse licensure compacts participation",
+        "Prior authorization reform, gold-carding, and turnaround time limits",
+        "Health data privacy (HIPAA-adjacent state laws; consumer health data acts)",
+        "Reproductive health access statutes and shield laws",
+        "Mental health parity enforcement and network adequacy standards",
+        "Behavioral health crisis response (988) funding and mobile teams",
+        "Opioid prescribing limits, PDMP mandates, and MAT access rules",
+        "Drug price transparency, PBM regulation, and spread-pricing bans",
+        "Hospital price transparency enforcement and penalty frameworks",
+        "Certificate of Need (CON) laws and reform proposals",
+        "Scope-of-practice expansions (NP/PA/pharmacist prescribing)",
+        "Vaccine mandates, exemptions, and school entry requirements",
+        "Public health emergency authorities and sunset clauses",
+        "Community benefit reporting and 340B program state oversight",
+        "Health equity reporting, stratified quality metrics, and SDOH screening",
+        "Right-to-repair for medical devices and service manuals access",
+        "AI/ML in healthcare guidelines, validation, and liability standards",
+        "Medical debt collection limits and charity care eligibility rules",
+        "Noncompete restrictions for healthcare workers",
+        
+        "State money transmitter laws as applied to digital assets",
+        "BitLicense-style regimes and virtual currency business activity definitions",
+        "Uniform Commercial Code (UCC) Article 12 adoption (controllable electronic records)",
+        "DAO legal recognition statutes and LLC wrappers",
+        "Digital asset tax conformity (staking rewards, airdrops, NFTs) by state",
+        "State and local crypto mining moratoria, noise/energy ordinances",
+        "Energy usage disclosure and grid interconnection standards for miners",
+        "Stablecoin reserve, attestation, and licensing requirements",
+        "Custody, safekeeping, and bankruptcy treatment of customer assets",
+        "Securities vs. commodities classification tests and safe harbors (state echoes)",
+        "Blue sky laws and accredited investor definitions for token offerings",
+        "Advertising/disclosure requirements for crypto yield and lending products",
+        "Travel Rule implementation and VASP-to-VASP compliance expectations",
+        "KYC/AML/BSA obligations and MSB registration triggers",
+        "OFAC sanctions screening expectations for wallets and mixers",
+        "Self-hosted wallet rules and AML risk guidance",
+        "NFT royalty enforcement, consumer protection, and IP misrepresentation laws",
+        "Tax withholding/reporting (1099-DA analogs) and broker definitions at state level",
+        "Escheatment/unclaimed property treatment of dormant digital assets",
+        "Digital identity, e-notary, and verifiable credentials recognition",
+        
+        "Federal NEPA reforms and permitting timelines tracking",
+        "Federal IRA/IIJA grant programs, guidance, and domestic content rules",
+        "FERC rulemakings on interconnection, transmission planning, and cost allocation",
+        "EPA power sector rules (GHG, mercury, wastewater) and state implementation",
+        "CMS payment rules (PFS, OPPS, IPPS) and quality measure changes",
+        "FTC/DOJ healthcare merger guidelines and state AG reviews",
+        "SEC/CFTC digital asset enforcement trends and rule proposals",
+        "Banking regulators’ guidance on crypto custody and capital treatment",
+        "DOE appliance standards schedules and test procedure updates",
+        "USDA climate-smart commodities and conservation program rule changes"
+]
+
+
+const improvedMockData = [
+    "Federal carbon pricing or cap-and-trade proposals",
+    "California cap-and-trade program and expansions",
+    "State Renewable Portfolio Standards (e.g., New York, Colorado)",
+    "Federal clean electricity standard proposals",
+    "Methane emissions rules for oil and gas (EPA + Texas/Oklahoma state rules)",
+    "Hydrofluorocarbon (HFC) phasedown rules (EPA AIM Act)",
+    "Building energy codes adoption (California Title 24, New York stretch codes)",
+    "Federal transmission permitting reforms (FERC/NEPA)",
+    "Offshore wind leasing and state procurement schedules (New Jersey, Massachusetts)",
+    "State distributed solar net metering rules (e.g., California NEM 3.0)",
+    "State EV purchase rebates and federal EV tax credits",
+    "EV charging infrastructure mandates (California, New York, federal NEVI program)",
+    "State clean trucks rules (California ACT and ZEV truck mandates)",
+    "Federal and state carbon capture and storage regulations (Class VI wells)",
+    "Environmental justice laws (New Jersey EJ law, federal EJ screening tools)",
+    "State plastics bans (e.g., New York plastic bag ban)",
+    "Extended Producer Responsibility laws (Oregon, Colorado packaging EPR)",
+    "PFAS restrictions and drinking water standards (federal EPA, Michigan)",
+    "State groundwater management reforms (California SGMA)",
+    "Wildfire resilience and forest management laws (California, Oregon)",
+    "State building performance standards (e.g., Washington, Colorado)",
+    "Federal appliance efficiency standards (DOE)",
+    "Community solar enabling laws (Minnesota, New York)",
+    "State hydrogen hub participation and clean hydrogen standards",
+    "Water reuse and direct potable reuse rules (Arizona, California)",
+  
+    "Medicaid expansion status (e.g., Texas vs. California)",
+    "State telehealth parity laws (e.g., Massachusetts, Arizona)",
+    "Cross-state physician/nurse licensure compacts",
+    "Prior authorization reform (Texas, Michigan)",
+    "Health data privacy laws (California CCPA/CPRA, Washington My Health My Data Act)",
+    "Reproductive health access laws (California protections vs. Texas restrictions)",
+    "Mental health parity enforcement (federal + state)",
+    "Opioid prescribing limits and PDMP mandates (Kentucky, West Virginia)",
+    "Drug price transparency and PBM regulation (Colorado, Nevada)",
+    "Hospital price transparency enforcement (federal CMS, state AGs)",
+    "Certificate of Need (CON) laws (North Carolina, New York)",
+    "Scope-of-practice expansions (nurse practitioners in Arizona, Florida)",
+    "Vaccine mandate and exemption laws (California vs. Texas)",
+    "Public health emergency authorities (federal vs. Florida restrictions)",
+    "Health equity reporting requirements (Illinois, federal CMS)",
+    "Noncompete restrictions for healthcare workers (federal FTC, Minnesota ban)",
+  
+    "New York BitLicense regime",
+    "Wyoming DAO LLC statute",
+    "State money transmitter laws applied to crypto (Texas, Florida)",
+    "UCC Article 12 adoption for digital assets (various states)",
+    "Crypto mining moratoria or energy rules (New York, Kentucky incentives)",
+    "Stablecoin reserve and licensing requirements (federal proposals, New York DFS)",
+    "Custody and bankruptcy treatment of customer digital assets (federal + state)",
+    "Securities vs. commodities classification debates (SEC vs. CFTC, echoed by states)",
+    "State-level advertising/disclosure requirements for crypto lending products",
+    "KYC/AML compliance under state MSB rules",
+    "Tax reporting for digital assets (federal IRS rules, state conformity)",
+    "Escheatment/unclaimed property treatment of dormant crypto (Delaware, California)",
+  
+    "Federal NEPA reforms and permitting timelines",
+    "FERC interconnection and transmission planning rules",
+    "EPA power plant greenhouse gas regulations",
+    "CMS payment rules for Medicare and Medicaid",
+    "FTC/DOJ healthcare merger guidelines",
+    "SEC/CFTC crypto enforcement actions",
+    "Banking regulators’ guidance on crypto custody",
+    "USDA climate-smart commodity program rules"
+  ]  
+      
+        
+
+for (const alert of improvedMockData) {
+    const { error } = await supabase.from('alerts')
+        .insert({
+                "user_id": userId,
+                "alert_name": alert
+            })
+        .select();
+
+    if (error) {
+        console.error(error);
+    }
+}
