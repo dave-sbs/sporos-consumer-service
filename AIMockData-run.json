@@ -1,0 +1,32 @@
+{
+    "overview": {
+      "totalProcessed": 52,
+      "currentThroughput": "10.4/min",
+      "errorRate": "5.77%",
+      "avgProcessingTime": "6096ms"
+    },
+    "quality": {
+      "averageMatches": "18.96",
+      "noMatchRate": "50.0%",
+      "totalMatches": 929
+    },
+    "reliability": {
+      "dlqRate": "1.92%",
+      "timeoutRate": "0.00%",
+      "retrySuccessRate": "0.0%"
+    },
+    "alerts": {
+      "recentAnomalies": [
+        {
+          "type": "error spike",
+          "severity": "medium",
+          "time": "2025-08-19T17:07:51.651Z"
+        },
+        {
+          "type": "error spike",
+          "severity": "medium",
+          "time": "2025-08-19T17:08:07.844Z"
+        }
+      ]
+    }
+  }

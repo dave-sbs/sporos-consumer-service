@@ -1,6 +1,7 @@
 import pino from 'pino'
 import 'dotenv/config'
 import { createClient } from '@supabase/supabase-js'
+import { MetricsCollector, createMetricsCollector, formatMetricsForDashboard } from './metrics'
 
 const logger = pino()
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -98,9 +99,13 @@ class QueueConsumer {
     private idleTimeout = 30000; // 30 seconds of no work before shutdown
     private lastWorkTime = Date.now();
     private enableHttpServer = false; // Set to true if you want HTTP wake-up endpoint
+    private lastMetricsLog = Date.now();
 
     // Debug non-matches
     private nonMatchedResponses: Record<string, any> = {};
+    
+    // Metrics collector
+    private metrics: MetricsCollector;
     
     private circuitBreaker = {
         state: 'CLOSED' as 'CLOSED' | 'OPEN' | 'HALF_OPEN',
@@ -114,6 +119,9 @@ class QueueConsumer {
 
     async start() {
         logger.info(`Consumer starting with ID: ${this.consumerId} in ${this.isServerless ? 'serverless' : 'continuous'} mode`)
+
+        // Initialize metrics collector
+        this.metrics = createMetricsCollector()
 
         // Restore state from DB
         await this.restoreState() 
@@ -149,6 +157,17 @@ class QueueConsumer {
                     mode: this.isServerless ? 'serverless' : 'continuous',
                     idleTime: Date.now() - this.lastWorkTime
                 }))
+            } else if (req.method === 'GET' && req.url === '/metrics') {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                const summary = this.metrics.getMetricsSummary()
+                const formatted = formatMetricsForDashboard(summary)
+                res.end(JSON.stringify(formatted, null, 2))
+            } else if (req.method === 'GET' && req.url === '/metrics/raw') {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify(this.metrics.getMetricsSummary(), null, 2))
+            } else if (req.method === 'GET' && req.url === '/metrics/prometheus') {
+                res.writeHead(200, { 'Content-Type': 'text/plain' })
+                res.end(this.metrics.exportMetricsForPrometheus())
             } else {
                 res.writeHead(404)
                 res.end('Not found')
@@ -287,6 +306,9 @@ class QueueConsumer {
 
         logger.info(`Processing batch of ${messages.length} messages with concurrency ${this.concurrency}`)
 
+        // Record batch size for metrics
+        this.metrics.recordBatchSize(messages.length)
+
         // Process messages with limited concurrency
         const promises = messages.map(message => this.processMessage(message))
         const results = await Promise.allSettled(promises)
@@ -337,15 +359,28 @@ class QueueConsumer {
     }
 
     private async processMessage(message: AlertsQueue): Promise<void> {
+        const startKey = this.metrics.recordProcessingStart(message.id)
+        let matchCount = 0
+        
         try {
             logger.info(`Processing message: ${message.id}, for alert: ${message.payload.alert_name}`)
 
-            // Simulate processing - replace with actual alert processing logic
-            await this.processAlert(message.payload)
+            // Process the alert and get match count
+            matchCount = await this.processAlert(message.payload)
 
             // Mark as completed
             await this.markMessageCompleted(message.id)
             this.successCount++
+            
+            // Record successful processing with metrics
+            this.metrics.recordProcessingEnd(
+                startKey, 
+                true, 
+                matchCount, 
+                message.payload.id,
+                message.payload.alert_name,
+                message.payload.alert_priority
+            )
             
             // Update circuit breaker on success
             if (this.circuitBreaker.state === 'HALF_OPEN') {
@@ -354,32 +389,46 @@ class QueueConsumer {
                     this.circuitBreaker.state = 'CLOSED'
                     this.circuitBreaker.failures = 0
                     this.circuitBreaker.halfOpenCalls = 0
+                    this.metrics.recordCircuitBreakerEvent('closed', 'CLOSED', 'HALF_OPEN')
                     logger.info('Circuit breaker closed after successful half-open calls')
                 }
             }
 
         } catch (error) {
             logger.error({ error, messageId: message.id }, 'Failed to process message')
+            
+            // Record failed processing
+            this.metrics.recordProcessingEnd(startKey, false, 0)
+            this.metrics.recordError(error, {
+                alertId: message.payload.id,
+                retryCount: message.retry_count
+            })
+            
             await this.handleMessageError(message, error)
             this.errorCount++
             this.updateCircuitBreakerOnFailure()
         }
     }
 
-    private async processAlert(payload: AlertPayload): Promise<void> {
+    private async processAlert(payload: AlertPayload): Promise<number> {
         try {
+            // sendToLangGraph now handles all error validation internally
             const result = await this.sendToLangGraph(payload);
-            if (result.status === 'error') {
-                throw new Error(result.error);
-            }
 
+            // extractMatches now handles response validation and proper error detection
             const matches = await this.extractMatches(result);
+            
             if (matches.length > 0) {
                 await this.addMatchedBills(payload.id, matches);
+                logger.info(`Successfully processed alert ${payload.id}: ${matches.length} matches found and stored`);
+            } else {
+                logger.info(`Successfully processed alert ${payload.id}: no matches found`);
             }
             
+            return matches.length;
+            
         } catch (error) {
-            console.error('Processing failed:', error);
+            logger.error({ error: error.message, alertId: payload.id, alertName: payload.alert_name }, 'Alert processing failed');
             throw error;
         }
     }
@@ -403,6 +452,8 @@ class QueueConsumer {
 
         const controller = new AbortController();
         const timeout = setTimeout(()=>controller.abort(), 10000);
+        const startTime = Date.now();
+        
         try {
             const response = await fetch(`${LANGGRAPH_API_URL}/runs/wait`, {
                 method: 'POST',
@@ -413,18 +464,64 @@ class QueueConsumer {
 
             if (!response.ok) {
                 const errorText = await response.text();
-                console.error('LangGraph error response:', errorText);
-                throw new Error(`LangGraph error: ${response.status} - ${errorText}`);
+                logger.error({ status: response.status, errorText }, 'LangGraph HTTP error response');
+                throw new Error(`LangGraph HTTP error: ${response.status} - ${errorText}`);
             }
 
-            const result = await response.json();
+            // Check if response is complete
+            const contentLength = response.headers.get('content-length');
+            if (contentLength && contentLength === '0') {
+                throw new Error('LangGraph returned empty response (content-length: 0)');
+            }
+
+            let result;
+            try {
+                result = await response.json();
+            } catch (jsonError) {
+                logger.error({ jsonError, status: response.status }, 'Failed to parse LangGraph response as JSON');
+                throw new Error(`LangGraph response parsing failed: ${jsonError.message}`);
+            }
+
+            // Validate response structure
+            if (!result || typeof result !== 'object') {
+                logger.error({ result }, 'LangGraph returned invalid response structure');
+                throw new Error('LangGraph returned invalid response structure (not an object)');
+            }
+
+            // Check for LangGraph-specific error indicators
+            if (result.status === 'error' || result.error) {
+                const errorMsg = result.error || result.message || 'Unknown LangGraph error';
+                logger.error({ error: result }, 'LangGraph returned error status');
+                throw new Error(`LangGraph processing error: ${errorMsg}`);
+            }
+
+            // Additional validation for expected response structure
+            if (!result.hasOwnProperty('retrieved_docs') && !result.hasOwnProperty('query')) {
+                logger.warn({ result }, 'LangGraph response missing expected fields (retrieved_docs or query)');
+                // Don't throw here as it might be a valid response format we haven't seen
+            }
+            
+            // Record successful LangGraph timing
+            this.metrics.recordLangGraphTiming(Date.now() - startTime);
+            
             return result;
         } catch (error) {
+            // Record failed LangGraph timing
+            this.metrics.recordLangGraphTiming(Date.now() - startTime);
+            
             if (error.name === 'AbortError') {
                 logger.warn('LangGraph request timed out after 10 seconds');
                 throw new Error('LangGraph request timed out after 10 seconds');
             }
-            console.error('LangGraph request failed', error);
+            
+            // Enhanced error logging for connection issues
+            if (error.message?.includes('fetch') || error.message?.includes('network') || 
+                error.message?.includes('ECONNRESET') || error.message?.includes('EPIPE')) {
+                logger.error({ error: error.message, alertId: payload.id }, 'LangGraph network/connection error detected');
+                throw new Error(`LangGraph connection error: ${error.message}`);
+            }
+            
+            logger.error({ error: error.message, alertId: payload.id }, 'LangGraph request failed');
             throw error;
         }
         finally{
@@ -434,18 +531,60 @@ class QueueConsumer {
 
     // Extract matches from LangGraph response
     private async extractMatches(response: any): Promise<{bill_id: string}[]> {
+        // Validate response structure first
+        if (!response || typeof response !== 'object') {
+            logger.error({ response }, 'Invalid response structure in extractMatches');
+            throw new Error('Cannot extract matches from invalid response structure');
+        }
+
         const matches: any[] = [];
+        
+        // Check if retrieved_docs exists and is an array
         if (response.retrieved_docs) {
-            for (const doc of response.retrieved_docs){
-            matches.push({
-                bill_id: doc.id
-            });
+            if (!Array.isArray(response.retrieved_docs)) {
+                logger.error({ retrieved_docs: response.retrieved_docs }, 'retrieved_docs is not an array');
+                throw new Error('LangGraph response.retrieved_docs is not an array');
+            }
+
+            for (const doc of response.retrieved_docs) {
+                if (!doc || !doc.id) {
+                    logger.warn({ doc }, 'Retrieved document missing id field');
+                    continue; // Skip malformed docs but don't fail entirely
+                }
+                matches.push({
+                    bill_id: doc.id
+                });
+            }
+        } else {
+            // Check if this is a valid response with no matches vs a malformed response
+            if (!response.hasOwnProperty('retrieved_docs')) {
+                // If response doesn't have retrieved_docs at all, check if it has other expected fields
+                if (!response.hasOwnProperty('query') && Object.keys(response).length === 0) {
+                    logger.error({ response }, 'Response appears to be empty or malformed - no expected fields found');
+                    throw new Error('LangGraph response appears to be empty or malformed');
+                }
+                // Log warning but don't fail - might be a valid response format
+                logger.warn({ response }, 'Response missing retrieved_docs field but has other data');
             }
         }
-        console.log(`Matches found: ${matches.length}`);
 
-        if (matches.length === 0) {
-            this.nonMatchedResponses[response.query] = response;
+        // Log the result with more context
+        if (matches.length > 0) {
+            logger.info(`Matches found: ${matches.length}`);
+        } else {
+            // Check if this is a legitimate "no matches" or a potential error
+            if (response.retrieved_docs && Array.isArray(response.retrieved_docs) && response.retrieved_docs.length === 0) {
+                logger.info('No matches found - retrieved_docs is empty array (legitimate no-match result)');
+            } else if (!response.retrieved_docs && response.query) {
+                logger.info('No matches found - no retrieved_docs but query present (legitimate no-match result)');
+            } else {
+                logger.warn({ response }, 'No matches found - response structure may be unexpected');
+            }
+        }
+
+        // Store non-matched responses for debugging (only if it looks like a legitimate response)
+        if (matches.length === 0 && (response.query || response.retrieved_docs !== undefined)) {
+            this.nonMatchedResponses[response.query || 'unknown_query'] = response;
         }
 
         return matches;
@@ -498,6 +637,7 @@ class QueueConsumer {
             // Move to DLQ
             await this.moveToDLQ(message, error)
             await this.markMessageFailed(message.id)
+            this.metrics.recordDLQEntry(error.message || String(error))
         } else {
             // Schedule retry with jitter
             const delay = this.calculateRetryDelay(retryCount)
@@ -562,12 +702,14 @@ class QueueConsumer {
     }
 
     private updateCircuitBreakerOnFailure(): void {
+        const oldState = this.circuitBreaker.state
         this.circuitBreaker.failures++
         this.circuitBreaker.lastFailure = new Date()
 
         if (this.circuitBreaker.failures >= this.circuitBreaker.threshold) {
             this.circuitBreaker.state = 'OPEN'
             this.circuitBreaker.halfOpenCalls = 0
+            this.metrics.recordCircuitBreakerEvent('opened', 'OPEN', oldState)
             logger.warn(`Circuit breaker opened after ${this.circuitBreaker.failures} failures`)
         }
     }
@@ -589,6 +731,13 @@ class QueueConsumer {
     private async sendHeartbeat(): Promise<void> {
         try {
             await this.persistState()
+            
+            // Log metrics every 5 minutes
+            if (Date.now() - this.lastMetricsLog > 5 * 60 * 1000) {
+                this.metrics.logMetricsSummary()
+                this.lastMetricsLog = Date.now()
+            }
+            
             logger.debug('Heartbeat sent')
         } catch (error) {
             logger.error({ error }, 'Failed to send heartbeat')
@@ -614,10 +763,12 @@ class QueueConsumer {
         if (successRate >= this.successThreshold && this.concurrency < this.maxConcurrency) {
             // Increase concurrency
             this.concurrency = Math.min(this.concurrency + 1, this.maxConcurrency)
+            this.metrics.recordConcurrencyChange(currentConcurrency, this.concurrency, 'increased_due_to_high_success_rate')
             logger.info(`Increased concurrency from ${currentConcurrency} to ${this.concurrency} (success rate: ${(successRate * 100).toFixed(2)}%)`)
         } else if (successRate < 0.8 && this.concurrency > this.minConcurrency) {
             // Decrease concurrency
             this.concurrency = Math.max(this.concurrency - 1, this.minConcurrency)
+            this.metrics.recordConcurrencyChange(currentConcurrency, this.concurrency, 'decreased_due_to_low_success_rate')
             logger.info(`Decreased concurrency from ${currentConcurrency} to ${this.concurrency} (success rate: ${(successRate * 100).toFixed(2)}%)`)
         }
 
@@ -652,6 +803,7 @@ class QueueConsumer {
             if (timeSinceFailure > this.circuitBreaker.timeout) {
                 this.circuitBreaker.state = 'HALF_OPEN'
                 this.circuitBreaker.halfOpenCalls = 0
+                this.metrics.recordCircuitBreakerEvent('half_opened', 'HALF_OPEN', 'OPEN')
                 logger.info('Circuit breaker half-open, trying again...')
                 return true
             }

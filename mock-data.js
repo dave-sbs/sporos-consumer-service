@@ -171,10 +171,64 @@ const improvedMockData = [
     "Banking regulators’ guidance on crypto custody",
     "USDA climate-smart commodity program rules"
   ]  
+
+
+const AIMockData = [
+    "Track AI regulation in Massachusetts.",
+    "Track AI regulation in California.",
+    "Track AI regulation in New York.",
+    "Track AI regulation in Texas.",
+    "Track AI regulation in Florida.",
+    "Track AI regulation in Georgia.",
+    "Track AI regulation in Illinois.",
+    "Track AI regulation in Michigan.",
+    "Track AI regulation in Ohio.",
+    "Track AI regulation in Pennsylvania.",
+    "Track AI regulation in Virginia.",
+    "Track AI regulation in Washington.",
+    "Track AI regulation in Oregon.",
+    "Track AI regulation in Colorado.",
+    "Track AI regulation in Nevada.",
+    "Track AI regulation in New Mexico.",
+    "Track AI regulation in Arizona.",
+    "Track AI regulation in Arkansas.",
+    "Track AI regulation in Louisiana.",
+    "Track AI regulation in Mississippi.",
+    "Track AI regulation in Alabama.",
+    "Track AI regulation in South Carolina.",
+    "Track AI regulation in North Carolina.",
+    "Track AI regulation in South Dakota.",
+    "Track AI regulation in North Dakota.",
+    "Track AI regulation in Nebraska.",
+    "Track AI regulation in Kansas.",
+    "Track AI regulation in Oklahoma.",
+    "Track AI regulation in Missouri.",
+    "Track AI regulation in Iowa.",
+    "Track AI regulation in Minnesota.",
+    "Track AI regulation in Wisconsin.",
+    "Track AI regulation in Michigan.",
+    "Track AI regulation in Indiana.",
+    "Track AI regulation in Illinois.",
+    "Track AI regulation in Kentucky.",
+    "Track AI regulation in Tennessee.",
+    "Track AI regulation in Arkansas.",
+    "Track AI regulation in Louisiana.",
+    "Track AI regulation in Mississippi.",
+    "Track AI regulation in Alabama.",
+    "Track AI regulation in South Carolina.",
+    "Track AI regulation in North Carolina.",
+    "Track AI regulation in South Dakota.",
+    "Track AI regulation in North Dakota.",
+    "Track AI regulation in Nebraska.",
+    "Track AI regulation in Kansas.",
+    "Track AI regulation in Oklahoma.",
+    "Track AI regulation in Missouri.",
+    "Track AI regulation in Iowa.",
+]
       
         
 
-for (const alert of improvedMockData) {
+for (const alert of AIMockData) {
     const { error } = await supabase.from('alerts')
         .insert({
                 "user_id": userId,
