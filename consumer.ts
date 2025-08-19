@@ -87,7 +87,7 @@ interface QueueConsumerState {
 class QueueConsumer {
     private concurrency = 1;
     private minConcurrency = 1;
-    private maxConcurrency = 5;
+    private maxConcurrency = 3; // 3 is max conccurency it can handle in dev
     private consumerId = `consumer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     private successCount = 0;
     private errorCount = 0;
@@ -95,6 +95,7 @@ class QueueConsumer {
     private adjustmentInterval = 30000; // 30 seconds
     private successThreshold = 0.95; // 95% success rate to increase concurrency
     private maxRetries = 3;
+    private maxRetriesBrokenPipe = 7;
     private isServerless = false; // Enable serverless mode
     private idleTimeout = 30000; // 30 seconds of no work before shutdown
     private lastWorkTime = Date.now();
@@ -106,6 +107,17 @@ class QueueConsumer {
     
     // Metrics collector
     private metrics: MetricsCollector;
+    
+    // Broken pipe specific handling
+    private brokenPipeState = {
+        isInPanicMode: false,
+        consecutiveBrokenPipes: 0,
+        lastBrokenPipeTime: null as Date | null,
+        panicModeStartTime: null as Date | null,
+        originalConcurrency: 1,
+        brokenPipeCount: 0,
+        recoveryAttempts: 0
+    };
     
     private circuitBreaker = {
         state: 'CLOSED' as 'CLOSED' | 'OPEN' | 'HALF_OPEN',
@@ -210,6 +222,7 @@ class QueueConsumer {
                 }
                 
                 await this.sendHeartbeat()
+                await this.checkBrokenPipeRecovery()
                 await this.adjustConcurrency()
             } catch (error) {
                 logger.error({ error }, 'Processing error')
@@ -233,6 +246,7 @@ class QueueConsumer {
                 }
                 
                 await this.sendHeartbeat()
+                await this.checkBrokenPipeRecovery()
                 await this.adjustConcurrency()
             } catch (error) {
                 logger.error({ error }, 'Processing error')
@@ -371,6 +385,9 @@ class QueueConsumer {
             // Mark as completed
             await this.markMessageCompleted(message.id)
             this.successCount++
+            
+            // Reset broken pipe counter on successful processing
+            this.onSuccessfulProcessing()
             
             // Record successful processing with metrics
             this.metrics.recordProcessingEnd(
@@ -537,6 +554,20 @@ class QueueConsumer {
             throw new Error('Cannot extract matches from invalid response structure');
         }
 
+        // Check for LangGraph error responses first
+        if (response.__error__) {
+            const errorData = response.__error__;
+            const errorMessage = errorData.message || errorData.error || 'Unknown LangGraph error';
+            logger.error({ errorData }, 'LangGraph returned error response');
+            throw new Error(`LangGraph error: ${errorMessage}`);
+        }
+
+        // Check for other error indicators
+        if (response.error) {
+            logger.error({ error: response.error }, 'LangGraph returned error field');
+            throw new Error(`LangGraph error: ${response.error}`);
+        }
+
         const matches: any[] = [];
         
         // Check if retrieved_docs exists and is an array
@@ -563,8 +594,19 @@ class QueueConsumer {
                     logger.error({ response }, 'Response appears to be empty or malformed - no expected fields found');
                     throw new Error('LangGraph response appears to be empty or malformed');
                 }
+                
+                // More aggressive check for unexpected response structure
+                const responseKeys = Object.keys(response);
+                const expectedKeys = ['retrieved_docs', 'query', 'status', 'message'];
+                const hasAnyExpectedKey = responseKeys.some(key => expectedKeys.includes(key));
+                
+                if (!hasAnyExpectedKey && responseKeys.length > 0) {
+                    logger.error({ response, responseKeys }, 'Response has unexpected structure - no recognized fields');
+                    throw new Error(`LangGraph response has unexpected structure with keys: ${responseKeys.join(', ')}`);
+                }
+                
                 // Log warning but don't fail - might be a valid response format
-                logger.warn({ response }, 'Response missing retrieved_docs field but has other data');
+                logger.warn({ response }, 'Response missing retrieved_docs field but has other recognized data');
             }
         }
 
@@ -631,6 +673,13 @@ class QueueConsumer {
     }
 
     private async handleMessageError(message: AlertsQueue, error: any): Promise<void> {
+        // Check if this is a broken pipe error and handle specially
+        if (this.isBrokenPipeError(error)) {
+            await this.handleBrokenPipeError(message, error);
+            return;
+        }
+
+        // Standard error handling for non-broken-pipe errors
         const retryCount = message.retry_count + 1
 
         if (retryCount >= this.maxRetries) {
@@ -639,7 +688,7 @@ class QueueConsumer {
             await this.markMessageFailed(message.id)
             this.metrics.recordDLQEntry(error.message || String(error))
         } else {
-            // Schedule retry with jitter
+            // Schedule retry with standard jitter
             const delay = this.calculateRetryDelay(retryCount)
             const scheduledFor = new Date(Date.now() + delay)
 
@@ -728,6 +777,164 @@ class QueueConsumer {
             .eq('id', 'singleton')
     }
 
+    // Broken Pipe Detection and Handling
+    private isBrokenPipeError(error: any): boolean {
+        const errorStr = error.message || error.toString() || '';
+        return errorStr.includes('[Errno 32] Broken pipe') || 
+               errorStr.includes('EPIPE') ||
+               errorStr.includes('Broken pipe') ||
+               errorStr.includes('Connection reset by peer') ||
+               errorStr.includes('WriteError') ||
+               errorStr.includes('RemoteProtocolError') ||
+               errorStr.includes('ConnectionTerminated');
+    }
+
+    private async handleBrokenPipeError(message: AlertsQueue, error: any): Promise<void> {
+        this.brokenPipeState.brokenPipeCount++;
+        this.brokenPipeState.consecutiveBrokenPipes++;
+        this.brokenPipeState.lastBrokenPipeTime = new Date();
+
+        logger.error({ 
+            error: error.message, 
+            messageId: message.id,
+            consecutiveBrokenPipes: this.brokenPipeState.consecutiveBrokenPipes,
+            totalBrokenPipes: this.brokenPipeState.brokenPipeCount
+        }, 'Broken pipe error detected');
+
+        // Enter panic mode if we hit multiple broken pipes
+        if (this.brokenPipeState.consecutiveBrokenPipes >= 2 && !this.brokenPipeState.isInPanicMode) {
+            await this.enterBrokenPipePanicMode();
+        }
+
+        // Calculate broken pipe specific retry delay
+        const retryDelay = this.calculateBrokenPipeRetryDelay(message.retry_count + 1);
+        const scheduledFor = new Date(Date.now() + retryDelay);
+
+        const retryCount = message.retry_count + 1;
+        if (retryCount >= this.maxRetriesBrokenPipe) {
+            // Move to DLQ
+            await this.moveToDLQ(message, error);
+            await this.markMessageFailed(message.id);
+            this.metrics.recordDLQEntry(`Broken pipe: ${error.message || String(error)}`);
+        } else {
+            // Schedule retry with extended delay
+            await supabase
+                .from('alerts_queue')
+                .update({
+                    status: 'pending',
+                    retry_count: retryCount,
+                    scheduled_for: scheduledFor.toISOString(),
+                    error: `Broken pipe (attempt ${retryCount}): ${error.message || String(error)}`,
+                    locked_by: null,
+                    locked_at: null
+                })
+                .eq('id', message.id);
+
+            logger.warn(`Scheduled broken pipe retry ${retryCount}/${this.maxRetriesBrokenPipe} for message ${message.id} in ${Math.round(retryDelay/1000)}s (extended delay)`);
+        }
+    }
+
+    private async enterBrokenPipePanicMode(): Promise<void> {
+        if (this.brokenPipeState.isInPanicMode) return;
+
+        this.brokenPipeState.isInPanicMode = true;
+        this.brokenPipeState.panicModeStartTime = new Date();
+        this.brokenPipeState.originalConcurrency = this.concurrency;
+        this.brokenPipeState.recoveryAttempts = 0;
+
+        // Emergency concurrency reduction
+        this.concurrency = 1;
+        
+        logger.error({
+            originalConcurrency: this.brokenPipeState.originalConcurrency,
+            newConcurrency: this.concurrency,
+            consecutiveBrokenPipes: this.brokenPipeState.consecutiveBrokenPipes
+        }, 'ENTERING BROKEN PIPE PANIC MODE - Emergency concurrency reduction');
+
+        this.metrics.recordConcurrencyChange(
+            this.brokenPipeState.originalConcurrency, 
+            this.concurrency, 
+            'emergency_broken_pipe_reduction'
+        );
+
+        // Persist the panic mode state
+        await this.persistState();
+    }
+
+    private calculateBrokenPipeRetryDelay(retryCount: number): number {
+        // Extended exponential backoff for broken pipe: 30s → 90s → 180s
+        const baseDelays = [30000, 90000, 180000]; // 30s, 90s, 3min
+        const baseDelay = baseDelays[Math.min(retryCount - 1, baseDelays.length - 1)];
+        
+        // Enhanced jitter: 25-50% to avoid thundering herd
+        const jitterMin = 0.25;
+        const jitterMax = 0.5;
+        const jitter = (jitterMin + Math.random() * (jitterMax - jitterMin)) * baseDelay;
+        
+        return baseDelay + jitter;
+    }
+
+    private async checkBrokenPipeRecovery(): Promise<void> {
+        if (!this.brokenPipeState.isInPanicMode) return;
+
+        const timeSincePanic = Date.now() - this.brokenPipeState.panicModeStartTime!.getTime();
+        const minPanicDuration = 5 * 60 * 1000; // 5 minutes minimum
+
+        // Don't even consider recovery for first 5 minutes
+        if (timeSincePanic < minPanicDuration) {
+            logger.debug(`Still in panic mode cooldown (${Math.round((minPanicDuration - timeSincePanic)/1000)}s remaining)`);
+            return;
+        }
+
+        // Check if we've had recent broken pipes
+        const timeSinceLastBrokenPipe = this.brokenPipeState.lastBrokenPipeTime ? 
+            Date.now() - this.brokenPipeState.lastBrokenPipeTime.getTime() : Infinity;
+        
+        const recoveryWindow = 10 * 60 * 1000; // 10 minutes without broken pipes
+
+        if (timeSinceLastBrokenPipe > recoveryWindow) {
+            await this.exitBrokenPipePanicMode();
+        } else {
+            logger.debug(`Waiting for broken pipe recovery (${Math.round((recoveryWindow - timeSinceLastBrokenPipe)/1000)}s remaining)`);
+        }
+    }
+
+    private async exitBrokenPipePanicMode(): Promise<void> {
+        const panicDuration = Date.now() - this.brokenPipeState.panicModeStartTime!.getTime();
+        
+        logger.info({
+            panicDurationMinutes: Math.round(panicDuration / 60000),
+            totalBrokenPipes: this.brokenPipeState.brokenPipeCount,
+            restoringConcurrency: Math.min(this.brokenPipeState.originalConcurrency, 2) // Conservative restoration
+        }, 'EXITING BROKEN PIPE PANIC MODE - Server appears to have recovered');
+
+        // Conservative concurrency restoration - don't go back to full immediately
+        const restoredConcurrency = Math.min(this.brokenPipeState.originalConcurrency, 2);
+        this.metrics.recordConcurrencyChange(
+            this.concurrency, 
+            restoredConcurrency, 
+            'broken_pipe_panic_recovery'
+        );
+        
+        this.concurrency = restoredConcurrency;
+        
+        // Reset broken pipe state
+        this.brokenPipeState.isInPanicMode = false;
+        this.brokenPipeState.consecutiveBrokenPipes = 0;
+        this.brokenPipeState.panicModeStartTime = null;
+        this.brokenPipeState.recoveryAttempts = 0;
+
+        await this.persistState();
+    }
+
+    private onSuccessfulProcessing(): void {
+        // Reset consecutive broken pipe counter on any successful processing
+        if (this.brokenPipeState.consecutiveBrokenPipes > 0) {
+            logger.debug(`Resetting consecutive broken pipe counter from ${this.brokenPipeState.consecutiveBrokenPipes} to 0`);
+            this.brokenPipeState.consecutiveBrokenPipes = 0;
+        }
+    }
+
     private async sendHeartbeat(): Promise<void> {
         try {
             await this.persistState()
@@ -747,6 +954,16 @@ class QueueConsumer {
     private async adjustConcurrency(): Promise<void> {
         const now = Date.now()
         if (now - this.lastAdjustment < this.adjustmentInterval) {
+            return
+        }
+
+        // Don't adjust concurrency if we're in broken pipe panic mode
+        if (this.brokenPipeState.isInPanicMode) {
+            logger.debug('Skipping concurrency adjustment - in broken pipe panic mode')
+            // Still reset counters though
+            this.successCount = 0
+            this.errorCount = 0
+            this.lastAdjustment = now
             return
         }
 
