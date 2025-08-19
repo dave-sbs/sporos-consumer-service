@@ -24,16 +24,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-/**
- * 
- * We'll have:
- * - Adaptive Concurrency method
- * - Circuit Breaker with db persistence
- * - Heartbeat to keep the consumer alive
- * - Jitter for retry delays
- * - DLQ for failed messages
- */
-
 interface AlertPayload {
     id: string, // uuid
     user_id: string, // uuid
@@ -186,6 +176,8 @@ class QueueConsumer {
                         const idleTime = Date.now() - this.lastWorkTime
                         if (idleTime > this.idleTimeout) {
                             logger.info(`Idle for ${idleTime}ms, shutting down serverless consumer`)
+                            logger.info('Updating circuit breaker to reset state and failure count before idling')
+                            this.updateCircuitBreakerBeforeIdle()
                             console.log(`Non-matches: ${JSON.stringify(this.nonMatchedResponses)}`);
                             await this.shutdown()
                             process.exit(0)
@@ -297,7 +289,12 @@ class QueueConsumer {
 
         // Process messages with limited concurrency
         const promises = messages.map(message => this.processMessage(message))
-        await Promise.allSettled(promises)
+        const results = await Promise.allSettled(promises)
+        results.forEach((result, index) => {
+            if (result.status === 'rejected') {
+                logger.error({ error: result.reason, messageId: messages[index].id }, 'Unexpected message processing rejection')
+            }
+        })
         return true
     }
 
@@ -341,7 +338,7 @@ class QueueConsumer {
 
     private async processMessage(message: AlertsQueue): Promise<void> {
         try {
-            logger.info(`Simulating processing message ${message.id} for alert ${message.payload.alert_name}`)
+            logger.info(`Processing message: ${message.id}, for alert: ${message.payload.alert_name}`)
 
             // Simulate processing - replace with actual alert processing logic
             await this.processAlert(message.payload)
@@ -370,8 +367,6 @@ class QueueConsumer {
     }
 
     private async processAlert(payload: AlertPayload): Promise<void> {
-        // TODO: Implement actual alert processing logic
-        // Send to LangGraph without user authentication
         try {
             const result = await this.sendToLangGraph(payload);
             if (result.status === 'error') {
@@ -379,9 +374,13 @@ class QueueConsumer {
             }
 
             const matches = await this.extractMatches(result);
+            if (matches.length > 0) {
+                await this.addMatchedBills(payload.id, matches);
+            }
             
         } catch (error) {
             console.error('Processing failed:', error);
+            throw error;
         }
     }
 
@@ -420,13 +419,21 @@ class QueueConsumer {
 
             const result = await response.json();
             return result;
-        } finally{
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                logger.warn('LangGraph request timed out after 10 seconds');
+                throw new Error('LangGraph request timed out after 10 seconds');
+            }
+            console.error('LangGraph request failed', error);
+            throw error;
+        }
+        finally{
             clearTimeout(timeout);
         }
     }
 
     // Extract matches from LangGraph response
-    private async extractMatches(response: any): Promise<any> {
+    private async extractMatches(response: any): Promise<{bill_id: string}[]> {
         const matches: any[] = [];
         if (response.retrieved_docs) {
             for (const doc of response.retrieved_docs){
@@ -444,8 +451,27 @@ class QueueConsumer {
         return matches;
     }
 
+    private async addMatchedBills(alertId: string, billMatches: {bill_id: string}[]): Promise<void> {
+        const alertBills = billMatches.map(bill => ({
+            alert_id: alertId,
+            bill_id: bill.bill_id,
+            matched_date: new Date().toISOString()
+        }));
+
+        const { error } = await supabase.from('alert_bills').upsert(alertBills, {
+            onConflict: 'alert_id,bill_id',
+            ignoreDuplicates: true
+          });
+          if (error) {
+            console.error('Failed to store matches:', error);
+            throw error;
+          }
+        logger.info(`Added ${billMatches.length} bills to alert ${alertId}`)
+    }
+    
     private async markMessageCompleted(messageId: string): Promise<void> {
-        await supabase
+        try {
+            const { error } = await supabase
             .from('alerts_queue')
             .update({
                 status: 'completed',
@@ -454,6 +480,15 @@ class QueueConsumer {
                 locked_at: null
             })
             .eq('id', messageId)
+
+            if (error) {
+                logger.error({ error }, 'Failed to mark message as completed')
+                throw error;
+            }
+        } catch (error) {
+            logger.error({ error }, 'Failed to mark message as completed')
+            throw error;
+        }
     }
 
     private async handleMessageError(message: AlertsQueue, error: any): Promise<void> {
@@ -537,6 +572,20 @@ class QueueConsumer {
         }
     }
 
+    private updateCircuitBreakerBeforeIdle(): void {
+        this.circuitBreaker.state = 'CLOSED'
+        this.circuitBreaker.failures = 0
+        this.circuitBreaker.halfOpenCalls = 0
+
+        supabase
+            .from('alerts_queue_consumer_state')
+            .update({
+                circuit_state: this.circuitBreaker.state,
+                circuit_failure_count: this.circuitBreaker.failures,
+            })
+            .eq('id', 'singleton')
+    }
+
     private async sendHeartbeat(): Promise<void> {
         try {
             await this.persistState()
@@ -559,6 +608,8 @@ class QueueConsumer {
 
         const successRate = this.getSuccessRate()
         const currentConcurrency = this.concurrency
+
+        logger.info(`Success rate: ${successRate}, Current concurrency: ${currentConcurrency}`)
 
         if (successRate >= this.successThreshold && this.concurrency < this.maxConcurrency) {
             // Increase concurrency
