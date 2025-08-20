@@ -96,10 +96,10 @@ class QueueConsumer {
     private successThreshold = 0.95; // 95% success rate to increase concurrency
     private maxRetries = 3;
     private maxRetriesBrokenPipe = 7;
-    private isServerless = false; // Enable serverless mode
+    private isServerless = true; // Enable serverless mode
     private idleTimeout = 30000; // 30 seconds of no work before shutdown
     private lastWorkTime = Date.now();
-    private enableHttpServer = false; // Set to true if you want HTTP wake-up endpoint
+    private enableHttpServer = true; // Set to true if you want HTTP wake-up endpoint
     private lastMetricsLog = Date.now();
 
     // Debug non-matches
