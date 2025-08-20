@@ -180,6 +180,15 @@ class QueueConsumer {
             } else if (req.method === 'GET' && req.url === '/metrics/prometheus') {
                 res.writeHead(200, { 'Content-Type': 'text/plain' })
                 res.end(this.metrics.exportMetricsForPrometheus())
+            } else if (req.method === 'GET' && req.url === '/') {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ 
+                    status: 'ok', 
+                    service: 'sporos-consumer-service',
+                    mode: 'serverless',
+                    timestamp: new Date().toISOString(),
+                    consumerId: this.consumerId
+                }))
             } else {
                 res.writeHead(404)
                 res.end('Not found')
@@ -1086,7 +1095,7 @@ function getOptionalEnvVar(name: string, defaultValue: string): string {
 
 const config = {
     serverless: getRequiredEnvVar('CONSUMER_MODE') === 'serverless',
-    idleTimeout: parseInt(getOptionalEnvVar('IDLE_TIMEOUT', '30000')),
+    idleTimeout: parseInt(getOptionalEnvVar('IDLE_TIMEOUT', '120000')),
     enableHttp: getRequiredEnvVar('ENABLE_HTTP') === 'true',
     port: getRequiredEnvVar('PORT')
 }
