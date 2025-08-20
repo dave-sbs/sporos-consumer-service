@@ -37,10 +37,10 @@ class QueueConsumer {
         this.successThreshold = 0.95; // 95% success rate to increase concurrency
         this.maxRetries = 3;
         this.maxRetriesBrokenPipe = 7;
-        this.isServerless = false; // Enable serverless mode
+        this.isServerless = true; // Enable serverless mode
         this.idleTimeout = 30000; // 30 seconds of no work before shutdown
         this.lastWorkTime = Date.now();
-        this.enableHttpServer = false; // Set to true if you want HTTP wake-up endpoint
+        this.enableHttpServer = false; // Will be set from environment variables
         this.lastMetricsLog = Date.now();
         // Debug non-matches
         this.nonMatchedResponses = {};
@@ -120,9 +120,20 @@ class QueueConsumer {
                 res.end('Not found');
             }
         });
-        const port = process.env.PORT || 3000;
-        server.listen(port, () => {
-            logger.info(`HTTP server listening on port ${port}`);
+        const port = process.env.PORT;
+        if (!port) {
+            throw new Error('PORT environment variable is required but not set');
+        }
+        const host = '0.0.0.0'; // Explicitly bind to all interfaces for Railway
+        server.listen(parseInt(port), host, () => {
+            logger.info(`HTTP server listening on ${host}:${port}`);
+            logger.info(`Server accessible at: http://${host}:${port}`);
+            logger.info('Available endpoints:');
+            logger.info('  POST /wake - Wake up the consumer');
+            logger.info('  GET /health - Health check');
+            logger.info('  GET /metrics - Formatted metrics');
+            logger.info('  GET /metrics/raw - Raw metrics data');
+            logger.info('  GET /metrics/prometheus - Prometheus format');
         });
     }
     async runServerless() {
@@ -872,18 +883,38 @@ class QueueConsumer {
 }
 // Start consumer
 const consumer = new QueueConsumer();
-// Configuration from environment variables
+// Configuration from environment variables (required)
+function getRequiredEnvVar(name, defaultValue) {
+    const value = process.env[name] || defaultValue;
+    if (!value) {
+        throw new Error(`Required environment variable ${name} is not set`);
+    }
+    return value;
+}
+function getOptionalEnvVar(name, defaultValue) {
+    return process.env[name] || defaultValue;
+}
 const config = {
-    serverless: process.env.CONSUMER_MODE === 'serverless' ? true : false,
-    idleTimeout: parseInt(process.env.IDLE_TIMEOUT || '30000'),
-    enableHttp: process.env.ENABLE_HTTP === 'true' ? true : false,
-    port: process.env.PORT || 3000
+    serverless: getRequiredEnvVar('CONSUMER_MODE') === 'serverless',
+    idleTimeout: parseInt(getOptionalEnvVar('IDLE_TIMEOUT', '30000')),
+    enableHttp: getRequiredEnvVar('ENABLE_HTTP') === 'true',
+    port: getRequiredEnvVar('PORT')
 };
 // Apply configuration
 consumer['isServerless'] = config.serverless;
 consumer['idleTimeout'] = config.idleTimeout;
 consumer['enableHttpServer'] = config.enableHttp;
 logger.info({ config }, 'Consumer configuration loaded');
+logger.info(`🚀 Consumer Mode: ${config.serverless ? 'SERVERLESS' : 'CONTINUOUS'}`);
+logger.info(`🌐 HTTP Server: ${config.enableHttp ? 'ENABLED' : 'DISABLED'}`);
+logger.info(`⏱️  Idle Timeout: ${config.idleTimeout}ms`);
+logger.info(`📡 Port: ${config.port}`);
+if (config.enableHttp) {
+    logger.info(`🔗 Expected Railway URL: https://sporos-consumer-service-production.up.railway.app`);
+    logger.info(`🎯 Test endpoints after deployment:`);
+    logger.info(`   curl https://sporos-consumer-service-production.up.railway.app/health`);
+    logger.info(`   curl -X POST https://sporos-consumer-service-production.up.railway.app/wake`);
+}
 consumer.start().catch(error => {
     logger.fatal({ error }, 'Consumer crashed');
     process.exit(1);
