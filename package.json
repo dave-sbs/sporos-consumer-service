@@ -1,25 +1,26 @@
 {
   "name": "consumer-service",
   "version": "1.0.0",
-  "description": "Queue consumer service with adaptive concurrency and circuit breaker",
-  "main": "consumer.ts",
+  "description": "Queue consumer service for the sporos alerts feature with adaptive concurrency and circuit breaker",
+  "main": "dist/consumer.js",
   "scripts": {
-    "start": "ts-node consumer.ts",
-    "dev": "ts-node --watch consumer.ts",
     "build": "tsc",
-    "start:prod": "node dist/consumer.js"
+    "start": "node dist/consumer.js",
+    "dev": "ts-node consumer.ts",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
-    "dotenv": "^16.3.1",
-    "pino": "^8.17.0"
+    "pino": "^8.0.0",
+    "@supabase/supabase-js": "^2.0.0",
+    "dotenv": "^16.0.0"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0",
-    "ts-node": "^10.9.1",
-    "typescript": "^5.3.0"
+    "typescript": "^5.0.0",
+    "ts-node": "^10.0.0",
+    "@types/node": "^20.0.0"
   },
-  "keywords": ["queue", "consumer", "circuit-breaker", "adaptive-concurrency"],
-  "author": "",
-  "license": "MIT"
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

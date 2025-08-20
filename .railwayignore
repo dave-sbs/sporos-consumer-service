@@ -1,0 +1,23 @@
+# Development files
+mock-data/
+observability/
+*.md
+*.js
+run*.js
+
+# Documentation
+NEW_QUEUE_SYSTEM.md
+V2 Implementation.md
+README.md
+
+# Development scripts
+run1.js
+run2.js
+
+# Only deploy what's needed
+!consumer.ts
+!metrics.ts
+!package.json
+!package-lock.json
+!tsconfig.json
+!.env

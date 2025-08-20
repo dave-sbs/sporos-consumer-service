@@ -106,7 +106,7 @@ class QueueConsumer {
     private nonMatchedResponses: Record<string, any> = {};
     
     // Metrics collector
-    private metrics: MetricsCollector;
+    private metrics!: MetricsCollector;
     
     // Broken pipe specific handling
     private brokenPipeState = {
@@ -445,7 +445,8 @@ class QueueConsumer {
             return matches.length;
             
         } catch (error) {
-            logger.error({ error: error.message, alertId: payload.id, alertName: payload.alert_name }, 'Alert processing failed');
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            logger.error({ error: errorMessage, alertId: payload.id, alertName: payload.alert_name }, 'Alert processing failed');
             throw error;
         }
     }
@@ -459,7 +460,7 @@ class QueueConsumer {
             }
         };
 
-        const headers = {
+        const headers: Record<string, string> = {
             'Content-Type': 'application/json'
         };
 
@@ -495,8 +496,9 @@ class QueueConsumer {
             try {
                 result = await response.json();
             } catch (jsonError) {
-                logger.error({ jsonError, status: response.status }, 'Failed to parse LangGraph response as JSON');
-                throw new Error(`LangGraph response parsing failed: ${jsonError.message}`);
+                const jsonErrorMessage = jsonError instanceof Error ? jsonError.message : String(jsonError);
+                logger.error({ jsonError: jsonErrorMessage, status: response.status }, 'Failed to parse LangGraph response as JSON');
+                throw new Error(`LangGraph response parsing failed: ${jsonErrorMessage}`);
             }
 
             // Validate response structure
@@ -526,19 +528,22 @@ class QueueConsumer {
             // Record failed LangGraph timing
             this.metrics.recordLangGraphTiming(Date.now() - startTime);
             
-            if (error.name === 'AbortError') {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            const errorName = error instanceof Error ? error.name : 'UnknownError';
+            
+            if (errorName === 'AbortError') {
                 logger.warn('LangGraph request timed out after 10 seconds');
                 throw new Error('LangGraph request timed out after 10 seconds');
             }
             
             // Enhanced error logging for connection issues
-            if (error.message?.includes('fetch') || error.message?.includes('network') || 
-                error.message?.includes('ECONNRESET') || error.message?.includes('EPIPE')) {
-                logger.error({ error: error.message, alertId: payload.id }, 'LangGraph network/connection error detected');
-                throw new Error(`LangGraph connection error: ${error.message}`);
+            if (errorMessage.includes('fetch') || errorMessage.includes('network') || 
+                errorMessage.includes('ECONNRESET') || errorMessage.includes('EPIPE')) {
+                logger.error({ error: errorMessage, alertId: payload.id }, 'LangGraph network/connection error detected');
+                throw new Error(`LangGraph connection error: ${errorMessage}`);
             }
             
-            logger.error({ error: error.message, alertId: payload.id }, 'LangGraph request failed');
+            logger.error({ error: errorMessage, alertId: payload.id }, 'LangGraph request failed');
             throw error;
         }
         finally{

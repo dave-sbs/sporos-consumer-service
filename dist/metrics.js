@@ -1,290 +1,182 @@
-import pino from 'pino'
-
-const logger = pino()
-
-// Interfaces for structured metrics
-export interface ProcessingMetrics {
-    totalProcessed: number;
-    batchSizes: number[];
-    averageBatchSize: number;
-    averageProcessingTime: number;
-    p95ProcessingTime: number;
-    p99ProcessingTime: number;
-    langgraphResponseTimes: number[];
-}
-
-export interface ThroughputMetrics {
-    messagesPerSecond: number;
-    messagesPerMinute: number;
-    messagesPerHour: number;
-    peakThroughput: number;
-    throughputTrend: Array<{timestamp: Date, rate: number}>;
-}
-
-export interface ResourceMetrics {
-    concurrencyUtilization: number;
-    concurrencyChanges: Array<{timestamp: Date, old: number, new: number, reason: string}>;
-    dbConnectionsActive?: number;
-    httpConnectionsActive?: number;
-}
-
-export interface MatchQualityMetrics {
-    totalMatches: number;
-    averageMatchesPerAlert: number;
-    noMatchAlerts: number;
-    highConfidenceMatches: number;
-    matchDistribution: Record<string, number>;
-    alertTypeMatchRates: Record<string, number>;
-    alertPriorityMatchRates: Record<'low' | 'high', number>;
-}
-
-export interface ReliabilityMetrics {
-    retryDistribution: Record<number, number>;
-    retrySuccessRates: Record<number, number>;
-    dlqRate: number;
-    dlqReasons: Record<string, number>;
-    errorTypes: Record<string, number>;
-    timeoutRate: number;
-    networkErrorRate: number;
-    langgraphErrorRate: number;
-    databaseErrorRate: number;
-}
-
-export interface CircuitBreakerMetrics {
-    stateHistory: Array<{timestamp: Date, state: string, reason: string}>;
-    timeInOpen: number;
-    timeInHalfOpen: number;
-    timeInClosed: number;
-    tripFrequency: number;
-    recoveryTime: number;
-}
-
-export interface AlertMetrics {
-    processingTimeP99: number;
-    errorRateLast5Min: number;
-    successRateLast5Min: number;
-    errorRateTrend: 'increasing' | 'decreasing' | 'stable';
-    throughputTrend: 'increasing' | 'decreasing' | 'stable';
-    anomalies: Array<{
-        type: 'error_spike' | 'throughput_drop' | 'latency_spike';
-        severity: 'low' | 'medium' | 'high';
-        timestamp: Date;
-        value: number;
-    }>;
-}
-
-export interface MetricsSummary {
-    performance: ProcessingMetrics;
-    throughput: ThroughputMetrics;
-    resources: ResourceMetrics;
-    quality: MatchQualityMetrics;
-    reliability: ReliabilityMetrics;
-    circuitBreaker: CircuitBreakerMetrics;
-    alerts: AlertMetrics;
-    timestamp: Date;
-}
-
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.MetricsCollector = void 0;
+exports.createMetricsCollector = createMetricsCollector;
+exports.formatMetricsForDashboard = formatMetricsForDashboard;
+const pino_1 = __importDefault(require("pino"));
+const logger = (0, pino_1.default)();
 // Main metrics collector class
-export class MetricsCollector {
-    // Processing timing data
-    private startTimes = new Map<string, number>();
-    private processingTimes: number[] = [];
-    private langgraphTimes: number[] = [];
-    private batchSizes: number[] = [];
-    private matchCounts: number[] = [];
-    
-    // Error tracking
-    private errorsByType: Record<string, number> = {};
-    private retrysByAttempt: Record<number, number> = {};
-    private retrySuccessByAttempt: Record<number, number> = {};
-    private dlqEntries: Array<{reason: string, timestamp: Date}> = [];
-    
-    // Circuit breaker tracking
-    private circuitBreakerEvents: Array<{timestamp: Date, event: string, state: string}> = [];
-    private stateStartTimes: Record<string, Date> = {};
-    private stateDurations: Record<string, number[]> = {
-        OPEN: [],
-        HALF_OPEN: [],
-        CLOSED: []
-    };
-    
-    // Real-time sliding windows
-    private last5MinErrors: Array<{timestamp: Date, error: any, type: string}> = [];
-    private last5MinSuccesses: Array<{timestamp: Date}> = [];
-    private throughputWindow: Array<{timestamp: Date, count: number}> = [];
-    
-    // Concurrency tracking
-    private concurrencyChanges: Array<{timestamp: Date, old: number, new: number, reason: string}> = [];
-    
-    // Match quality tracking
-    private matchesByAlert: Array<{alertId: string, matchCount: number, alertType?: string, priority?: string}> = [];
-    
-    // Anomaly detection
-    private anomalies: Array<{type: string, severity: string, timestamp: Date, value: number}> = [];
-    
-    // Configuration
-    private maxHistorySize = 1000;
-    private cleanupInterval = 5 * 60 * 1000; // 5 minutes
-    private lastCleanup = Date.now();
-
+class MetricsCollector {
     constructor() {
+        // Processing timing data
+        this.startTimes = new Map();
+        this.processingTimes = [];
+        this.langgraphTimes = [];
+        this.batchSizes = [];
+        this.matchCounts = [];
+        // Error tracking
+        this.errorsByType = {};
+        this.retrysByAttempt = {};
+        this.retrySuccessByAttempt = {};
+        this.dlqEntries = [];
+        // Circuit breaker tracking
+        this.circuitBreakerEvents = [];
+        this.stateStartTimes = {};
+        this.stateDurations = {
+            OPEN: [],
+            HALF_OPEN: [],
+            CLOSED: []
+        };
+        // Real-time sliding windows
+        this.last5MinErrors = [];
+        this.last5MinSuccesses = [];
+        this.throughputWindow = [];
+        // Concurrency tracking
+        this.concurrencyChanges = [];
+        // Match quality tracking
+        this.matchesByAlert = [];
+        // Anomaly detection
+        this.anomalies = [];
+        // Configuration
+        this.maxHistorySize = 1000;
+        this.cleanupInterval = 5 * 60 * 1000; // 5 minutes
+        this.lastCleanup = Date.now();
+        // === PUBLIC GETTERS ===
+        this.dlqReasons = {};
         // Initialize state tracking
         this.stateStartTimes['CLOSED'] = new Date();
     }
-
     // === PROCESSING METRICS ===
-    
-    recordProcessingStart(messageId: string): string {
+    recordProcessingStart(messageId) {
         const startKey = `${messageId}_${Date.now()}`;
         this.startTimes.set(startKey, Date.now());
         return startKey;
     }
-
-    recordProcessingEnd(startKey: string, success: boolean, matchCount: number = 0, alertId?: string, alertType?: string, priority?: string): void {
+    recordProcessingEnd(startKey, success, matchCount = 0, alertId, alertType, priority) {
         const startTime = this.startTimes.get(startKey);
         if (startTime) {
             const duration = Date.now() - startTime;
             this.processingTimes.push(duration);
-            
             if (success) {
-                this.last5MinSuccesses.push({timestamp: new Date()});
+                this.last5MinSuccesses.push({ timestamp: new Date() });
                 this.matchesByAlert.push({
                     alertId: alertId || 'unknown',
                     matchCount,
                     alertType,
-                    priority: priority as 'low' | 'high'
+                    priority: priority
                 });
                 this.matchCounts.push(matchCount);
             }
-            
             this.trimArray(this.processingTimes);
             this.trimArray(this.matchCounts);
             this.startTimes.delete(startKey);
         }
-        
         this.cleanupOldEntries();
     }
-
-    recordLangGraphTiming(duration: number): void {
+    recordLangGraphTiming(duration) {
         this.langgraphTimes.push(duration);
         this.trimArray(this.langgraphTimes);
     }
-
-    recordBatchSize(size: number): void {
+    recordBatchSize(size) {
         this.batchSizes.push(size);
-        this.throughputWindow.push({timestamp: new Date(), count: size});
+        this.throughputWindow.push({ timestamp: new Date(), count: size });
         this.trimArray(this.batchSizes);
         this.cleanupOldEntries();
     }
-
     // === ERROR TRACKING ===
-    
-    recordError(error: any, context: {alertId?: string, retryCount?: number}): void {
+    recordError(error, context) {
         const errorType = this.classifyError(error);
         this.errorsByType[errorType] = (this.errorsByType[errorType] || 0) + 1;
-        
         if (context.retryCount !== undefined) {
             this.retrysByAttempt[context.retryCount] = (this.retrysByAttempt[context.retryCount] || 0) + 1;
         }
-        
         this.last5MinErrors.push({
             timestamp: new Date(),
             error,
             type: errorType
         });
-        
         // Check for error rate spike
         this.checkForAnomalies();
         this.cleanupOldEntries();
     }
-
-    recordRetrySuccess(retryAttempt: number): void {
+    recordRetrySuccess(retryAttempt) {
         this.retrySuccessByAttempt[retryAttempt] = (this.retrySuccessByAttempt[retryAttempt] || 0) + 1;
     }
-
-    recordDLQEntry(reason: string): void {
-        this.dlqEntries.push({reason, timestamp: new Date()});
+    recordDLQEntry(reason) {
+        this.dlqEntries.push({ reason, timestamp: new Date() });
         this.dlqReasons[reason] = (this.dlqReasons[reason] || 0) + 1;
     }
-
     // === CIRCUIT BREAKER TRACKING ===
-    
-    recordCircuitBreakerEvent(event: string, newState: string, oldState?: string): void {
+    recordCircuitBreakerEvent(event, newState, oldState) {
         const now = new Date();
-        
         this.circuitBreakerEvents.push({
             timestamp: now,
             event,
             state: newState
         });
-        
         // Track state duration
         if (oldState && this.stateStartTimes[oldState]) {
             const duration = now.getTime() - this.stateStartTimes[oldState].getTime();
             this.stateDurations[oldState].push(duration);
         }
-        
         this.stateStartTimes[newState] = now;
-        
         // Trim events history
         if (this.circuitBreakerEvents.length > 100) {
             this.circuitBreakerEvents.shift();
         }
     }
-
     // === CONCURRENCY TRACKING ===
-    
-    recordConcurrencyChange(oldLevel: number, newLevel: number, reason: string): void {
+    recordConcurrencyChange(oldLevel, newLevel, reason) {
         this.concurrencyChanges.push({
             timestamp: new Date(),
             old: oldLevel,
             new: newLevel,
             reason
         });
-        
         // Keep last 100 changes
         if (this.concurrencyChanges.length > 100) {
             this.concurrencyChanges.shift();
         }
     }
-
     // === UTILITY METHODS ===
-    
-    private classifyError(error: any): string {
-        if (error.name === 'AbortError') return 'timeout';
-        if (error.message?.includes('LangGraph error: 5')) return 'langgraph_server_error';
-        if (error.message?.includes('LangGraph error: 4')) return 'langgraph_client_error';
-        if (error.message?.includes('database') || error.message?.includes('supabase')) return 'database_error';
-        if (error.message?.includes('network') || error.message?.includes('fetch')) return 'network_error';
-        if (error.message?.includes('timeout')) return 'timeout';
+    classifyError(error) {
+        if (error.name === 'AbortError')
+            return 'timeout';
+        if (error.message?.includes('LangGraph error: 5'))
+            return 'langgraph_server_error';
+        if (error.message?.includes('LangGraph error: 4'))
+            return 'langgraph_client_error';
+        if (error.message?.includes('database') || error.message?.includes('supabase'))
+            return 'database_error';
+        if (error.message?.includes('network') || error.message?.includes('fetch'))
+            return 'network_error';
+        if (error.message?.includes('timeout'))
+            return 'timeout';
         return 'unknown_error';
     }
-
-    private trimArray(arr: number[]): void {
+    trimArray(arr) {
         if (arr.length > this.maxHistorySize) {
             arr.splice(0, arr.length - this.maxHistorySize);
         }
     }
-
-    private cleanupOldEntries(): void {
-        if (Date.now() - this.lastCleanup < this.cleanupInterval) return;
-        
+    cleanupOldEntries() {
+        if (Date.now() - this.lastCleanup < this.cleanupInterval)
+            return;
         const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-        
         this.last5MinErrors = this.last5MinErrors.filter(e => e.timestamp > fiveMinutesAgo);
         this.last5MinSuccesses = this.last5MinSuccesses.filter(s => s.timestamp > fiveMinutesAgo);
         this.throughputWindow = this.throughputWindow.filter(t => t.timestamp > fiveMinutesAgo);
         this.dlqEntries = this.dlqEntries.filter(d => d.timestamp > oneHourAgo);
         this.matchesByAlert = this.matchesByAlert.filter(m => Date.now() - Date.parse(m.alertId) < 24 * 60 * 60 * 1000); // Keep 24h
-        
         this.lastCleanup = Date.now();
     }
-
-    private checkForAnomalies(): void {
+    checkForAnomalies() {
         const errorRate = this.getErrorRateLast5Min();
         const throughput = this.getCurrentThroughput();
-        
         // Error spike detection
         if (errorRate > 0.2) {
             this.anomalies.push({
@@ -294,7 +186,6 @@ export class MetricsCollector {
                 value: errorRate
             });
         }
-        
         // Throughput drop detection (if we have historical data)
         if (this.throughputWindow.length > 10 && throughput < this.getAverageThroughput() * 0.5) {
             this.anomalies.push({
@@ -304,76 +195,62 @@ export class MetricsCollector {
                 value: throughput
             });
         }
-        
         // Keep only recent anomalies
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
         this.anomalies = this.anomalies.filter(a => a.timestamp > oneHourAgo);
     }
-
     // === CALCULATION METHODS ===
-    
-    private average(arr: number[]): number {
+    average(arr) {
         return arr.length === 0 ? 0 : arr.reduce((sum, val) => sum + val, 0) / arr.length;
     }
-
-    private percentile(arr: number[], p: number): number {
-        if (arr.length === 0) return 0;
+    percentile(arr, p) {
+        if (arr.length === 0)
+            return 0;
         const sorted = [...arr].sort((a, b) => a - b);
         const index = Math.ceil((p / 100) * sorted.length) - 1;
         return sorted[Math.max(0, index)];
     }
-
-    private getErrorRateLast5Min(): number {
+    getErrorRateLast5Min() {
         this.cleanupOldEntries();
         const totalEvents = this.last5MinErrors.length + this.last5MinSuccesses.length;
         return totalEvents === 0 ? 0 : this.last5MinErrors.length / totalEvents;
     }
-
-    private getSuccessRateLast5Min(): number {
+    getSuccessRateLast5Min() {
         return 1 - this.getErrorRateLast5Min();
     }
-
-    private getCurrentThroughput(): number {
+    getCurrentThroughput() {
         this.cleanupOldEntries();
         const totalMessages = this.throughputWindow.reduce((sum, t) => sum + t.count, 0);
         return totalMessages / 5; // messages per minute (over 5 minute window)
     }
-
-    private getAverageThroughput(): number {
-        if (this.throughputWindow.length === 0) return 0;
+    getAverageThroughput() {
+        if (this.throughputWindow.length === 0)
+            return 0;
         return this.average(this.throughputWindow.map(t => t.count));
     }
-
-    private getTrendDirection(values: number[]): 'increasing' | 'decreasing' | 'stable' {
-        if (values.length < 3) return 'stable';
-        
+    getTrendDirection(values) {
+        if (values.length < 3)
+            return 'stable';
         const recent = values.slice(-3);
         const isIncreasing = recent[2] > recent[1] && recent[1] > recent[0];
         const isDecreasing = recent[2] < recent[1] && recent[1] < recent[0];
-        
-        if (isIncreasing) return 'increasing';
-        if (isDecreasing) return 'decreasing';
+        if (isIncreasing)
+            return 'increasing';
+        if (isDecreasing)
+            return 'decreasing';
         return 'stable';
     }
-
-    // === PUBLIC GETTERS ===
-    
-    private dlqReasons: Record<string, number> = {};
-
-    getMetricsSummary(): MetricsSummary {
+    getMetricsSummary() {
         this.cleanupOldEntries();
-        
         // Calculate match distribution
-        const matchDistribution: Record<string, number> = {};
+        const matchDistribution = {};
         this.matchCounts.forEach(count => {
             const key = count === 0 ? 'no_matches' : count === 1 ? 'single_match' : 'multiple_matches';
             matchDistribution[key] = (matchDistribution[key] || 0) + 1;
         });
-
         // Calculate alert type match rates
-        const alertTypeMatchRates: Record<string, number> = {};
-        const alertPriorityMatchRates: Record<'low' | 'high', number> = { low: 0, high: 0 };
-        
+        const alertTypeMatchRates = {};
+        const alertPriorityMatchRates = { low: 0, high: 0 };
         this.matchesByAlert.forEach(match => {
             if (match.alertType) {
                 if (!alertTypeMatchRates[match.alertType]) {
@@ -383,23 +260,20 @@ export class MetricsCollector {
                     alertTypeMatchRates[match.alertType]++;
                 }
             }
-            
             if (match.priority && (match.priority === 'low' || match.priority === 'high')) {
                 if (match.matchCount > 0) {
                     alertPriorityMatchRates[match.priority]++;
                 }
             }
         });
-
         // Calculate retry success rates
-        const retrySuccessRates: Record<number, number> = {};
+        const retrySuccessRates = {};
         Object.keys(this.retrysByAttempt).forEach(attempt => {
             const attemptNum = parseInt(attempt);
             const totalRetries = this.retrysByAttempt[attemptNum] || 0;
             const successfulRetries = this.retrySuccessByAttempt[attemptNum] || 0;
             retrySuccessRates[attemptNum] = totalRetries === 0 ? 0 : successfulRetries / totalRetries;
         });
-
         return {
             performance: {
                 totalProcessed: this.processingTimes.length,
@@ -410,7 +284,6 @@ export class MetricsCollector {
                 p99ProcessingTime: this.percentile(this.processingTimes, 99),
                 langgraphResponseTimes: [...this.langgraphTimes]
             },
-            
             throughput: {
                 messagesPerSecond: this.getCurrentThroughput() / 60,
                 messagesPerMinute: this.getCurrentThroughput(),
@@ -421,12 +294,10 @@ export class MetricsCollector {
                     rate: t.count
                 }))
             },
-            
             resources: {
                 concurrencyUtilization: 0, // Will be set by consumer
                 concurrencyChanges: [...this.concurrencyChanges.slice(-10)]
             },
-            
             quality: {
                 totalMatches: this.matchCounts.reduce((sum, count) => sum + count, 0),
                 averageMatchesPerAlert: this.average(this.matchCounts),
@@ -436,32 +307,29 @@ export class MetricsCollector {
                 alertTypeMatchRates,
                 alertPriorityMatchRates
             },
-            
             reliability: {
-                retryDistribution: {...this.retrysByAttempt},
+                retryDistribution: { ...this.retrysByAttempt },
                 retrySuccessRates,
                 dlqRate: this.dlqEntries.length / Math.max(this.processingTimes.length, 1),
-                dlqReasons: {...this.dlqReasons},
-                errorTypes: {...this.errorsByType},
+                dlqReasons: { ...this.dlqReasons },
+                errorTypes: { ...this.errorsByType },
                 timeoutRate: (this.errorsByType['timeout'] || 0) / Math.max(this.processingTimes.length, 1),
                 networkErrorRate: (this.errorsByType['network_error'] || 0) / Math.max(this.processingTimes.length, 1),
                 langgraphErrorRate: ((this.errorsByType['langgraph_server_error'] || 0) + (this.errorsByType['langgraph_client_error'] || 0)) / Math.max(this.processingTimes.length, 1),
                 databaseErrorRate: (this.errorsByType['database_error'] || 0) / Math.max(this.processingTimes.length, 1)
             },
-            
             circuitBreaker: {
                 stateHistory: [...this.circuitBreakerEvents.slice(-10).map(e => ({
-                    timestamp: e.timestamp,
-                    state: e.state,
-                    reason: e.event
-                }))],
+                        timestamp: e.timestamp,
+                        state: e.state,
+                        reason: e.event
+                    }))],
                 timeInOpen: this.average(this.stateDurations['OPEN'] || []),
                 timeInHalfOpen: this.average(this.stateDurations['HALF_OPEN'] || []),
                 timeInClosed: this.average(this.stateDurations['CLOSED'] || []),
                 tripFrequency: this.circuitBreakerEvents.filter(e => e.event.includes('opened')).length,
                 recoveryTime: this.average(this.stateDurations['OPEN'] || [])
             },
-            
             alerts: {
                 processingTimeP99: this.percentile(this.processingTimes, 99),
                 errorRateLast5Min: this.getErrorRateLast5Min(),
@@ -469,17 +337,15 @@ export class MetricsCollector {
                 errorRateTrend: this.getTrendDirection(this.last5MinErrors.map(() => 1)),
                 throughputTrend: this.getTrendDirection(this.throughputWindow.map(t => t.count)),
                 anomalies: [...this.anomalies.slice(-5).map(a => ({
-                    type: a.type as 'error_spike' | 'throughput_drop' | 'latency_spike',
-                    severity: a.severity as 'low' | 'medium' | 'high',
-                    timestamp: a.timestamp,
-                    value: a.value
-                }))]
+                        type: a.type,
+                        severity: a.severity,
+                        timestamp: a.timestamp,
+                        value: a.value
+                    }))]
             },
-            
             timestamp: new Date()
         };
     }
-
     getSimpleMetrics() {
         return {
             processedCount: this.processingTimes.length,
@@ -489,13 +355,12 @@ export class MetricsCollector {
             currentThroughput: this.getCurrentThroughput(),
             averageMatches: this.average(this.matchCounts),
             noMatchAlerts: this.matchCounts.filter(c => c === 0).length,
-            errorsByType: {...this.errorsByType},
+            errorsByType: { ...this.errorsByType },
             recentAnomalies: this.anomalies.slice(-3)
         };
     }
-
     // Export methods for external monitoring
-    exportMetricsForPrometheus(): string {
+    exportMetricsForPrometheus() {
         const metrics = this.getSimpleMetrics();
         return [
             `# HELP consumer_processed_total Total number of processed messages`,
@@ -515,15 +380,13 @@ export class MetricsCollector {
             `consumer_throughput_per_minute ${metrics.currentThroughput}`
         ].join('\n');
     }
-
-    exportMetricsForInfluxDB(): Array<{measurement: string, tags: Record<string, string>, fields: Record<string, number>, timestamp: number}> {
+    exportMetricsForInfluxDB() {
         const metrics = this.getSimpleMetrics();
         const timestamp = Date.now() * 1000000; // InfluxDB expects nanoseconds
-        
         return [
             {
                 measurement: 'consumer_performance',
-                tags: {service: 'alert-consumer'},
+                tags: { service: 'alert-consumer' },
                 fields: {
                     processed_count: metrics.processedCount,
                     avg_processing_time: metrics.averageProcessingTime,
@@ -535,7 +398,7 @@ export class MetricsCollector {
             },
             {
                 measurement: 'consumer_quality',
-                tags: {service: 'alert-consumer'},
+                tags: { service: 'alert-consumer' },
                 fields: {
                     avg_matches: metrics.averageMatches,
                     no_match_alerts: metrics.noMatchAlerts
@@ -544,9 +407,8 @@ export class MetricsCollector {
             }
         ];
     }
-
     // Reset methods for testing
-    reset(): void {
+    reset() {
         this.startTimes.clear();
         this.processingTimes = [];
         this.langgraphTimes = [];
@@ -565,9 +427,8 @@ export class MetricsCollector {
         this.anomalies = [];
         this.dlqReasons = {};
     }
-
     // Logging helper
-    logMetricsSummary(): void {
+    logMetricsSummary() {
         const summary = this.getSimpleMetrics();
         logger.info({
             metrics: {
@@ -583,13 +444,12 @@ export class MetricsCollector {
         }, 'Metrics Summary');
     }
 }
-
+exports.MetricsCollector = MetricsCollector;
 // Helper functions for easy integration
-export function createMetricsCollector(): MetricsCollector {
+function createMetricsCollector() {
     return new MetricsCollector();
 }
-
-export function formatMetricsForDashboard(metrics: MetricsSummary): Record<string, any> {
+function formatMetricsForDashboard(metrics) {
     return {
         overview: {
             totalProcessed: metrics.performance.totalProcessed,
@@ -605,7 +465,7 @@ export function formatMetricsForDashboard(metrics: MetricsSummary): Record<strin
         reliability: {
             dlqRate: `${(metrics.reliability.dlqRate * 100).toFixed(2)}%`,
             timeoutRate: `${(metrics.reliability.timeoutRate * 100).toFixed(2)}%`,
-            retrySuccessRate: Object.values(metrics.reliability.retrySuccessRates).length > 0 
+            retrySuccessRate: Object.values(metrics.reliability.retrySuccessRates).length > 0
                 ? `${(Object.values(metrics.reliability.retrySuccessRates).reduce((a, b) => a + b, 0) / Object.values(metrics.reliability.retrySuccessRates).length * 100).toFixed(1)}%`
                 : '0%'
         },
