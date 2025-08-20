@@ -101,6 +101,7 @@ class QueueConsumer {
     private lastWorkTime = Date.now();
     private enableHttpServer = false; // Will be set from environment variables
     private lastMetricsLog = Date.now();
+    private isWorkerSleeping = false; // Track if worker is sleeping
 
     // Debug non-matches
     private nonMatchedResponses: Record<string, any> = {};
@@ -144,7 +145,7 @@ class QueueConsumer {
         }
         
         if (this.isServerless) {
-            await this.runServerless()
+            await this.runServerlessWithKeepAlive()
         } else {
             await this.runContinuous()
         }
@@ -167,7 +168,9 @@ class QueueConsumer {
                     status: 'healthy', 
                     consumerId: this.consumerId,
                     mode: this.isServerless ? 'serverless' : 'continuous',
-                    idleTime: Date.now() - this.lastWorkTime
+                    workerStatus: this.isWorkerSleeping ? 'sleeping' : 'active',
+                    idleTime: Date.now() - this.lastWorkTime,
+                    httpServerActive: true
                 }))
             } else if (req.method === 'GET' && req.url === '/metrics') {
                 res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -213,10 +216,34 @@ class QueueConsumer {
         })
     }
 
-    private async runServerless(): Promise<void> {
-        logger.info('Running in serverless mode - will shutdown when idle')
+    private async runServerlessWithKeepAlive(): Promise<void> {
+        logger.info('Starting serverless mode with HTTP server keep-alive')
         
+        // Start the worker
+        await this.runWorkerUntilSleep()
+        
+        // Worker is now sleeping, but HTTP server stays alive
+        logger.info('Worker sleeping, HTTP server remains active for wake-up calls')
+        
+        // Keep the process alive with minimal activity
         while (true) {
+            if (!this.isWorkerSleeping) {
+                // Worker was woken up, restart it
+                logger.info('Worker woken up, restarting processing loop')
+                await this.runWorkerUntilSleep()
+                logger.info('Worker returned to sleep, HTTP server remains active')
+            }
+            
+            // Minimal heartbeat while sleeping
+            await this.sleep(5000) // Check every 5 seconds if worker should restart
+        }
+    }
+
+    private async runWorkerUntilSleep(): Promise<void> {
+        logger.info('Worker starting processing loop')
+        this.isWorkerSleeping = false
+        
+        while (!this.isWorkerSleeping) {
             try {
                 if (this.canProcess()) {
                     const hasWork = await this.processNextBatch()
@@ -224,17 +251,14 @@ class QueueConsumer {
                         this.lastWorkTime = Date.now()
                         logger.info('Work found, resetting idle timer')
                     } else {
-                        // Check if we've been idle long enough to shutdown
+                        // Check if we've been idle long enough to sleep worker
                         const idleTime = Date.now() - this.lastWorkTime
                         if (idleTime > this.idleTimeout) {
-                            logger.info(`Idle for ${idleTime}ms, shutting down serverless consumer`)
-                            logger.info('Updating circuit breaker to reset state and failure count before idling')
-                            this.updateCircuitBreakerBeforeIdle()
-                            console.log(`Non-matches: ${JSON.stringify(this.nonMatchedResponses)}`);
-                            await this.shutdown()
-                            process.exit(0)
+                            logger.info(`Idle for ${idleTime}ms, putting worker to sleep (HTTP server stays alive)`)
+                            await this.enterSleepMode()
+                            return // Exit worker loop but keep process alive
                         } else {
-                            logger.debug(`Idle for ${idleTime}ms, will shutdown in ${this.idleTimeout - idleTime}ms`)
+                            logger.debug(`Idle for ${idleTime}ms, will sleep worker in ${this.idleTimeout - idleTime}ms`)
                         }
                     }
                 } else {
@@ -1070,10 +1094,33 @@ class QueueConsumer {
         logger.info('Consumer shutdown complete')
     }
 
+    // Sleep mode methods
+    private async enterSleepMode(): Promise<void> {
+        logger.info('Entering sleep mode - worker stopping, HTTP server staying alive')
+        this.isWorkerSleeping = true
+        this.updateCircuitBreakerBeforeIdle()
+        console.log(`Non-matches: ${JSON.stringify(this.nonMatchedResponses)}`)
+        
+        // Final state persistence before sleep
+        await this.persistState()
+        
+        logger.info('Worker sleep mode active - HTTP server ready for wake-up calls')
+    }
+
     // Method to wake up consumer (called by edge function)
     public wakeUp(): void {
-        logger.info('Consumer woken up by external call')
-        this.lastWorkTime = Date.now()
+        if (this.isWorkerSleeping) {
+            logger.info('🚀 Consumer woken up by external call - restarting worker')
+            this.isWorkerSleeping = false
+            this.lastWorkTime = Date.now()
+            
+            // Reset circuit breaker state when waking up
+            this.circuitBreaker.state = 'CLOSED'
+            this.circuitBreaker.failures = 0
+        } else {
+            logger.info('Wake-up call received but worker is already active')
+            this.lastWorkTime = Date.now()
+        }
     }
 }
 
